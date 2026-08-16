@@ -1,6 +1,7 @@
 'use strict';
 
 const socket = io();
+const SESSION_KEY = 'rps101-player-session-v1';
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -12,9 +13,11 @@ const els = {
   randomChoice: $('randomChoice'), toggleOptions: $('toggleOptions'), moveInput: $('moveInput'),
   lockMove: $('lockMove'), moveMessage: $('moveMessage'), optionsPanel: $('optionsPanel'),
   optionSearch: $('optionSearch'), optionsGrid: $('optionsGrid'), resultCard: $('resultCard'),
-  resultRound: $('resultRound'), resultName0: $('resultName0'), resultMove0: $('resultMove0'),
-  resultName1: $('resultName1'), resultMove1: $('resultMove1'), resultWinner: $('resultWinner'),
-  resultText: $('resultText'), history: $('history')
+  resultRound: $('resultRound'), resultTitle: $('resultTitle'), resultName0: $('resultName0'),
+  resultEmoji0: $('resultEmoji0'), resultMove0: $('resultMove0'), resultName1: $('resultName1'),
+  resultEmoji1: $('resultEmoji1'), resultMove1: $('resultMove1'), resultWinner: $('resultWinner'),
+  resultHeadline: $('resultHeadline'), resultFlavor: $('resultFlavor'), history: $('history'),
+  resultSide0: $('resultSide0'), resultSide1: $('resultSide1')
 };
 
 let gestures = [];
@@ -23,6 +26,30 @@ let selfSeat = null;
 let currentRound = 1;
 let currentState = null;
 let historyEntries = [];
+
+function saveSession(code, seat, playerToken, playerName) {
+  try {
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify({ code, seat, playerToken, playerName }));
+  } catch {
+    // ignore
+  }
+}
+
+function loadSession() {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data?.code || !data?.playerToken) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function clearSession() {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch {}
+}
 
 function normalize(value) {
   return String(value ?? '')
@@ -144,8 +171,13 @@ function playerPanel(panel, player) {
 
   name.textContent = `${player.name}${player.seat === selfSeat ? ' (ty)' : ''}`;
   score.textContent = String(player.score);
-  lock.textContent = player.locked ? '🔒 locked' : 'vybírá';
-  lock.classList.toggle('locked', player.locked);
+  if (player.connected === false) {
+    lock.textContent = 'offline – čeká se na návrat';
+    lock.classList.remove('locked');
+  } else {
+    lock.textContent = player.locked ? '🔒 locked' : 'vybírá';
+    lock.classList.toggle('locked', player.locked);
+  }
   panel.classList.toggle('self', player.seat === selfSeat);
 }
 
@@ -157,7 +189,7 @@ function updateGameState(state) {
   playerPanel(els.player1, state.players.find((p) => p.seat === 1));
 
   const self = state.players.find((p) => p.seat === selfSeat);
-  const hasOpponent = state.players.length === 2;
+  const hasOpponent = state.players.length === 2 && state.players.every((p) => p.connected !== false);
   const locked = Boolean(self?.locked);
 
   els.moveInput.disabled = !hasOpponent || locked;
@@ -165,7 +197,9 @@ function updateGameState(state) {
   els.randomChoice.disabled = !hasOpponent || locked;
 
   if (!hasOpponent) {
-    els.turnStatus.textContent = 'Čeká se na druhého hráče. Pošli mu kód místnosti.';
+    els.turnStatus.textContent = state.players.length < 2
+      ? 'Čeká se na druhého hráče. Pošli mu kód místnosti.'
+      : 'Druhý hráč je dočasně offline. Místnost čeká na jeho návrat.';
   } else if (locked) {
     els.turnStatus.textContent = 'Tvoje volba je zamčená. Soupeř ji nevidí.';
   } else {
@@ -173,15 +207,17 @@ function updateGameState(state) {
   }
 }
 
-function enterRoom(code, seat) {
+function enterRoom(code, seat, resetHistory = true) {
   roomCode = code;
   selfSeat = seat;
   els.roomCode.textContent = code;
   els.lobby.classList.add('hidden');
   els.game.classList.remove('hidden');
-  els.resultCard.classList.add('hidden');
-  historyEntries = [];
-  renderHistory();
+  if (resetHistory) {
+    els.resultCard.classList.add('hidden');
+    historyEntries = [];
+    renderHistory();
+  }
   setMessage();
 }
 
@@ -213,23 +249,91 @@ function renderHistory() {
     round.textContent = `#${entry.round}`;
 
     const left = document.createElement('span');
-    left.textContent = `${entry.moves[0].name}: ${entry.moves[0].move}`;
+    left.className = 'history-side';
+    const leftEmoji = document.createElement('span');
+    leftEmoji.className = 'emoji';
+    leftEmoji.textContent = entry.moves[0].emoji ?? '🎲';
+    left.append(leftEmoji, document.createTextNode(`${entry.moves[0].name}: ${entry.moves[0].move}`));
+
+    const vs = document.createElement('span');
+    vs.className = 'separator muted';
+    vs.textContent = 'vs';
 
     const right = document.createElement('span');
-    right.textContent = `${entry.moves[1].name}: ${entry.moves[1].move}`;
+    right.className = 'history-side';
+    const rightEmoji = document.createElement('span');
+    rightEmoji.className = 'emoji';
+    rightEmoji.textContent = entry.moves[1].emoji ?? '🎲';
+    right.append(rightEmoji, document.createTextNode(`${entry.moves[1].name}: ${entry.moves[1].move}`));
 
     const winner = document.createElement('span');
     winner.className = 'history-winner';
-    winner.textContent = entry.winnerName ? `🏆 ${entry.winnerName}` : 'remíza';
+    winner.textContent = entry.winnerName ? `🏆 ${entry.winnerName}` : '🤝 remíza';
 
-    row.append(round, left, right, winner);
+    row.append(round, left, vs, right, winner);
     els.history.append(row);
   }
+}
+
+function animateResultCard() {
+  els.resultCard.classList.remove('show');
+  void els.resultCard.offsetWidth;
+  els.resultCard.classList.add('show');
+}
+
+function fillResultSide(sideEl, emojiEl, nameEl, moveEl, move) {
+  emojiEl.textContent = move.emoji ?? '🎲';
+  nameEl.textContent = move.name;
+  moveEl.textContent = move.move;
+  sideEl.classList.remove('winner', 'loser');
+}
+
+function renderRoundResult(result) {
+  els.resultCard.classList.remove('hidden');
+  els.resultRound.textContent = String(result.round);
+
+  fillResultSide(els.resultSide0, els.resultEmoji0, els.resultName0, els.resultMove0, result.moves[0]);
+  fillResultSide(els.resultSide1, els.resultEmoji1, els.resultName1, els.resultMove1, result.moves[1]);
+
+  if (result.winnerSeat === 0) {
+    els.resultSide0.classList.add('winner');
+    els.resultSide1.classList.add('loser');
+  } else if (result.winnerSeat === 1) {
+    els.resultSide1.classList.add('winner');
+    els.resultSide0.classList.add('loser');
+  }
+
+  const flavor = result.flavor ?? {};
+  els.resultTitle.textContent = flavor.title ?? 'Výsledek kola';
+  els.resultWinner.textContent = result.winnerName ? `🏆 ${result.winnerName} vyhrává kolo` : '🤝 Remíza';
+  els.resultHeadline.textContent = flavor.headline ?? result.text;
+  els.resultFlavor.textContent = flavor.description ?? result.text;
+
+  animateResultCard();
 }
 
 socket.on('connect', () => {
   els.connectionBadge.textContent = '● online';
   els.connectionBadge.className = 'badge online';
+
+  const saved = loadSession();
+  if (!saved) return;
+
+  socket.emit('resumeRoom', {
+    roomCode: saved.code,
+    playerToken: saved.playerToken
+  }, (response) => {
+    if (!response?.ok) {
+      clearSession();
+      resetToLobby(response?.error ?? 'Předchozí místnost už neexistuje.');
+      return;
+    }
+
+    const sameRoom = roomCode === response.code;
+    enterRoom(response.code, response.seat, !sameRoom);
+    if (saved.playerName && !els.playerName.value) els.playerName.value = saved.playerName;
+    setMessage(sameRoom ? 'Spojení obnoveno.' : 'Místnost byla obnovena po znovupřipojení.', 'success-text');
+  });
 });
 
 socket.on('disconnect', () => {
@@ -248,14 +352,7 @@ socket.on('roomState', (state) => {
 });
 
 socket.on('roundResult', (result) => {
-  els.resultCard.classList.remove('hidden');
-  els.resultRound.textContent = String(result.round);
-  els.resultName0.textContent = result.moves[0].name;
-  els.resultMove0.textContent = result.moves[0].move;
-  els.resultName1.textContent = result.moves[1].name;
-  els.resultMove1.textContent = result.moves[1].move;
-  els.resultWinner.textContent = result.winnerName ? `🏆 ${result.winnerName} vyhrává kolo` : '🤝 Remíza';
-  els.resultText.textContent = result.text;
+  renderRoundResult(result);
 
   historyEntries.unshift(result);
   historyEntries = historyEntries.slice(0, 30);
@@ -274,6 +371,7 @@ socket.on('scoreReset', () => {
 });
 
 socket.on('roomClosed', ({ reason }) => {
+  clearSession();
   const text = reason === 'opponent-disconnected'
     ? 'Soupeř se odpojil. Místnost byla uzavřena.'
     : 'Soupeř opustil místnost. Místnost byla uzavřena.';
@@ -287,6 +385,7 @@ els.createRoom.addEventListener('click', () => {
       els.lobbyError.textContent = response?.error ?? 'Nepodařilo se vytvořit místnost.';
       return;
     }
+    saveSession(response.code, response.seat, response.playerToken, els.playerName.value);
     enterRoom(response.code, response.seat);
   });
 });
@@ -301,6 +400,7 @@ els.joinRoom.addEventListener('click', () => {
       els.lobbyError.textContent = response?.error ?? 'Nepodařilo se připojit.';
       return;
     }
+    saveSession(response.code, response.seat, response.playerToken, els.playerName.value);
     enterRoom(response.code, response.seat);
   });
 });
@@ -383,5 +483,8 @@ els.resetScore.addEventListener('click', () => {
 });
 
 els.leaveRoom.addEventListener('click', () => {
-  socket.emit('leaveRoom', {}, () => resetToLobby('Opustil jsi místnost.'));
+  socket.emit('leaveRoom', {}, () => {
+    clearSession();
+    resetToLobby('Opustil jsi místnost.');
+  });
 });
