@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RPS-101 Online</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">101 možností · 5 050 duelů · 2 hráči</p>
+        <h1>RPS-101 ONLINE</h1>
+        <p class="subtitle">Vyber. Zamkni. Soupeř nic neuvidí. Pak přijde katastrofa.</p>
+      </div>
+      <div id="connectionBadge" class="badge offline">Připojuji…</div>
+    </header>
+
+    <section id="lobby" class="card lobby">
+      <h2>Vstup do arény</h2>
+      <label>
+        Tvoje jméno
+        <input id="playerName" maxlength="24" autocomplete="nickname" placeholder="např. Herdy">
+      </label>
+      <div class="lobby-actions">
+        <button id="createRoom" class="primary">Vytvořit místnost</button>
+        <span class="or">nebo</span>
+        <div class="join-row">
+          <input id="roomCodeInput" maxlength="6" autocomplete="off" placeholder="KÓD123">
+          <button id="joinRoom">Připojit se</button>
+        </div>
+      </div>
+      <p id="lobbyError" class="error" aria-live="polite"></p>
+    </section>
+
+    <section id="game" class="hidden">
+      <div class="roombar card">
+        <div>
+          <span class="muted">Místnost</span>
+          <strong id="roomCode">------</strong>
+          <button id="copyCode" class="small">Kopírovat kód</button>
+        </div>
+        <div class="room-actions">
+          <button id="resetScore" class="small">Reset skóre</button>
+          <button id="leaveRoom" class="small danger">Odejít</button>
+        </div>
+      </div>
+
+      <section class="scoreboard card">
+        <div id="player0" class="player-panel">
+          <div class="player-name">Hráč 1</div>
+          <div class="score">0</div>
+          <div class="lock-state">čeká</div>
+        </div>
+        <div class="round-box">
+          <span>Kolo</span>
+          <strong id="roundNumber">1</strong>
+        </div>
+        <div id="player1" class="player-panel">
+          <div class="player-name">Čeká se…</div>
+          <div class="score">0</div>
+          <div class="lock-state">offline</div>
+        </div>
+      </section>
+
+      <section class="card chooser">
+        <div class="chooser-heading">
+          <div>
+            <h2>Tvůj tah</h2>
+            <p id="turnStatus" class="muted">Čeká se na druhého hráče.</p>
+          </div>
+          <div class="chooser-tools">
+            <button id="randomChoice" class="small">🎲 Náhodná</button>
+            <button id="toggleOptions" class="small">Zobrazit 101 možností</button>
+          </div>
+        </div>
+
+        <div class="move-row">
+          <input id="moveInput" autocomplete="off" spellcheck="false" placeholder="např. Dragon">
+          <button id="lockMove" class="primary">🔒 LOCK</button>
+        </div>
+        <div id="moveMessage" class="message" aria-live="polite"></div>
+
+        <div id="optionsPanel" class="options-panel hidden">
+          <input id="optionSearch" autocomplete="off" placeholder="Filtrovat možnosti…">
+          <div id="optionsGrid" class="options-grid"></div>
+        </div>
+      </section>
+
+      <section id="resultCard" class="card result hidden" aria-live="polite">
+        <p class="eyebrow">Výsledek kola <span id="resultRound"></span></p>
+        <div class="reveal-grid">
+          <div>
+            <span id="resultName0" class="muted"></span>
+            <strong id="resultMove0"></strong>
+          </div>
+          <div class="versus">VS</div>
+          <div>
+            <span id="resultName1" class="muted"></span>
+            <strong id="resultMove1"></strong>
+          </div>
+        </div>
+        <h2 id="resultWinner"></h2>
+        <p id="resultText"></p>
+      </section>
+
+      <section class="card history-card">
+        <h2>Historie</h2>
+        <div id="history" class="history"><p class="muted">Zatím žádná krev.</p></div>
+      </section>
+    </section>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
