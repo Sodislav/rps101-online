@@ -1,0 +1,18 @@
+{
+  "name": "rps101-online",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Two-player online RPS-101 with private lock-in, room codes and typo-safe input.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test-rules.js"
+  },
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "dependencies": {
+    "express": "5.2.1",
+    "socket.io": "4.8.3"
+  }
+}
