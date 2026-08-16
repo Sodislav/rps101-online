@@ -12,7 +12,7 @@
       <div>
         <p class="eyebrow">101 možností · 5 050 duelů · 2 hráči</p>
         <h1>RPS-101 ONLINE</h1>
-        <p class="subtitle">Vyber. Zamkni. Soupeř nic neuvidí. Pak přijde katastrofa.</p>
+        <p class="subtitle">Vyber. Zamkni. Soupeř nic neuvidí. Pak přijde bizarní vysvětlení, proč právě Airplane ponížilo Dragon.</p>
       </div>
       <div id="connectionBadge" class="badge offline">Připojuji…</div>
     </header>
@@ -90,19 +90,27 @@
 
       <section id="resultCard" class="card result hidden" aria-live="polite">
         <p class="eyebrow">Výsledek kola <span id="resultRound"></span></p>
+        <div class="result-title-wrap">
+          <h2 id="resultTitle"></h2>
+          <p id="resultWinner" class="winner-line"></p>
+        </div>
+
         <div class="reveal-grid">
-          <div>
+          <div id="resultSide0" class="reveal-side">
+            <div id="resultEmoji0" class="result-emoji"></div>
             <span id="resultName0" class="muted"></span>
             <strong id="resultMove0"></strong>
           </div>
           <div class="versus">VS</div>
-          <div>
+          <div id="resultSide1" class="reveal-side">
+            <div id="resultEmoji1" class="result-emoji"></div>
             <span id="resultName1" class="muted"></span>
             <strong id="resultMove1"></strong>
           </div>
         </div>
-        <h2 id="resultWinner"></h2>
-        <p id="resultText"></p>
+
+        <p id="resultHeadline" class="result-headline"></p>
+        <p id="resultFlavor" class="result-flavor"></p>
       </section>
 
       <section class="card history-card">
