@@ -11,8 +11,11 @@ const {
   suggestGesture,
   outcome
 } = require('./lib/rules');
+const { battleFlavor, tieDescription, emojiFor } = require('./lib/flavor');
 
 const PORT = Number(process.env.PORT) || 3000;
+const RECONNECT_GRACE_MS = 2 * 60 * 1000;
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -20,8 +23,8 @@ const io = new Server(server, {
   perMessageDeflate: false
 });
 
-// Lightweight security headers. No external assets are needed except Socket.IO,
-// which is served from this same origin.
+const rooms = new Map();
+
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -34,20 +37,26 @@ app.use((req, res, next) => {
   next();
 });
 
+// Disable long caching while the game is being actively developed/deployed.
 app.use(express.static(path.join(__dirname, 'public'), {
   extensions: ['html'],
-  maxAge: '1h'
+  maxAge: 0,
+  etag: false
 }));
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, rooms: rooms.size });
+  res.json({
+    ok: true,
+    rooms: rooms.size,
+    clients: io.engine.clientsCount,
+    uptimeSeconds: Math.floor(process.uptime())
+  });
 });
-
-const rooms = new Map();
 
 function cleanName(value) {
   const name = String(value ?? '')
     .replace(/[\u0000-\u001F\u007F]/g, '')
+    .replace(/[<>]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
   if (!name || name.length > 24) return null;
@@ -66,17 +75,33 @@ function generateRoomCode() {
   throw new Error('Could not generate unique room code');
 }
 
+function generatePlayerToken() {
+  return crypto.randomBytes(24).toString('base64url');
+}
+
 function cleanRoomCode(value) {
   const code = String(value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   return /^[A-Z0-9]{6}$/.test(code) ? code : null;
 }
 
+function makePlayer(socket, seat, name) {
+  return {
+    socketId: socket.id,
+    token: generatePlayerToken(),
+    seat,
+    name,
+    connected: true,
+    disconnectTimer: null
+  };
+}
+
 function makeRoom(code, socket, playerName) {
   return {
     code,
-    players: [{ socketId: socket.id, seat: 0, name: playerName }],
+    players: [makePlayer(socket, 0, playerName)],
     scores: [0, 0],
     round: 1,
+    // Choices are keyed by seat, not socket ID, so a reconnect cannot lose a locked move.
     choices: new Map(),
     createdAt: Date.now()
   };
@@ -90,7 +115,8 @@ function publicState(room) {
       seat: player.seat,
       name: player.name,
       score: room.scores[player.seat],
-      locked: room.choices.has(player.socketId)
+      locked: room.choices.has(player.seat),
+      connected: player.connected
     }))
   };
 }
@@ -104,7 +130,7 @@ function getMembership(socket, roomCode) {
   if (!code) return null;
   const room = rooms.get(code);
   if (!room) return null;
-  const player = room.players.find((p) => p.socketId === socket.id);
+  const player = room.players.find((p) => p.socketId === socket.id && p.connected);
   if (!player) return null;
   return { room, player };
 }
@@ -117,6 +143,31 @@ function rateLimited(socket, key, minimumGapMs) {
   return now - previous < minimumGapMs;
 }
 
+function clearDisconnectTimer(player) {
+  if (player.disconnectTimer) {
+    clearTimeout(player.disconnectTimer);
+    player.disconnectTimer = null;
+  }
+}
+
+function closeRoom(room, reason = 'opponent-left', excludeSocketId = null) {
+  if (!rooms.has(room.code)) return;
+  rooms.delete(room.code);
+
+  for (const player of room.players) {
+    clearDisconnectTimer(player);
+    if (!player.socketId) continue;
+    const client = io.sockets.sockets.get(player.socketId);
+    if (!client) continue;
+    client.leave(room.code);
+    client.data.roomCode = null;
+    client.data.seat = null;
+    if (client.id !== excludeSocketId) {
+      client.emit('roomClosed', { reason });
+    }
+  }
+}
+
 function leaveCurrentRoom(socket, reason = 'opponent-left') {
   const code = socket.data.roomCode;
   if (!code) return;
@@ -127,18 +178,30 @@ function leaveCurrentRoom(socket, reason = 'opponent-left') {
   socket.data.seat = null;
 
   if (!room) return;
+  closeRoom(room, reason, socket.id);
+}
 
-  rooms.delete(code);
-  for (const player of room.players) {
-    if (player.socketId === socket.id) continue;
-    const other = io.sockets.sockets.get(player.socketId);
-    if (other) {
-      other.leave(code);
-      other.data.roomCode = null;
-      other.data.seat = null;
-      other.emit('roomClosed', { reason });
-    }
-  }
+function markTemporarilyDisconnected(socket) {
+  const code = socket.data.roomCode;
+  if (!code) return;
+  const room = rooms.get(code);
+  if (!room) return;
+
+  const player = room.players.find((p) => p.socketId === socket.id);
+  if (!player) return;
+
+  player.connected = false;
+  player.socketId = null;
+  clearDisconnectTimer(player);
+
+  // Do NOT kill the room immediately. Browsers/proxies can briefly reconnect.
+  // Give the player two minutes to resume with the private token stored in the tab.
+  player.disconnectTimer = setTimeout(() => {
+    if (!rooms.has(code) || player.connected) return;
+    closeRoom(room, 'opponent-disconnected');
+  }, RECONNECT_GRACE_MS);
+
+  broadcastState(room);
 }
 
 io.on('connection', (socket) => {
@@ -162,12 +225,14 @@ io.on('connection', (socket) => {
 
     const code = generateRoomCode();
     const room = makeRoom(code, socket, playerName);
+    const player = room.players[0];
     rooms.set(code, room);
     socket.join(code);
     socket.data.roomCode = code;
     socket.data.seat = 0;
 
-    ack({ ok: true, code, seat: 0 });
+    console.log(`Room ${code} created by ${playerName}`);
+    ack({ ok: true, code, seat: 0, playerToken: player.token });
     broadcastState(room);
   });
 
@@ -196,13 +261,50 @@ io.on('connection', (socket) => {
       return ack({ ok: false, error: 'Místnost je plná.' });
     }
 
-    const seat = 1;
-    room.players.push({ socketId: socket.id, seat, name: playerName });
+    const player = makePlayer(socket, 1, playerName);
+    room.players.push(player);
     socket.join(code);
     socket.data.roomCode = code;
-    socket.data.seat = seat;
+    socket.data.seat = 1;
 
-    ack({ ok: true, code, seat });
+    console.log(`${playerName} joined room ${code}`);
+    ack({ ok: true, code, seat: 1, playerToken: player.token });
+    broadcastState(room);
+  });
+
+  socket.on('resumeRoom', (payload, ack = () => {}) => {
+    if (socket.data.roomCode) {
+      return ack({ ok: true, code: socket.data.roomCode, seat: socket.data.seat });
+    }
+
+    const code = cleanRoomCode(payload?.roomCode);
+    const token = String(payload?.playerToken ?? '');
+    if (!code || !token) {
+      return ack({ ok: false, error: 'Chybí data pro obnovení místnosti.' });
+    }
+
+    const room = rooms.get(code);
+    if (!room) {
+      return ack({ ok: false, error: 'Místnost už neexistuje.' });
+    }
+
+    const player = room.players.find((p) => p.token === token);
+    if (!player) {
+      return ack({ ok: false, error: 'Neplatný obnovovací token.' });
+    }
+    if (player.connected && player.socketId && player.socketId !== socket.id) {
+      return ack({ ok: false, error: 'Tento hráč už je připojený v jiném panelu.' });
+    }
+
+    clearDisconnectTimer(player);
+    player.connected = true;
+    player.socketId = socket.id;
+    socket.join(code);
+    socket.data.roomCode = code;
+    socket.data.seat = player.seat;
+
+    console.log(`${player.name} resumed room ${code}`);
+    ack({ ok: true, code, seat: player.seat });
     broadcastState(room);
   });
 
@@ -217,15 +319,15 @@ io.on('connection', (socket) => {
     }
 
     const { room, player } = membership;
-    if (room.players.length !== 2) {
-      return ack({ ok: false, error: 'Čeká se na druhého hráče.' });
+    if (room.players.length !== 2 || room.players.some((p) => !p.connected)) {
+      return ack({ ok: false, error: 'Čeká se na druhého připojeného hráče.' });
     }
 
     if (!Number.isInteger(payload?.round) || payload.round !== room.round) {
       return ack({ ok: false, error: 'Tohle kolo už není aktuální.' });
     }
 
-    if (room.choices.has(socket.id)) {
+    if (room.choices.has(player.seat)) {
       return ack({ ok: false, error: 'Volbu už máš uzamčenou.' });
     }
 
@@ -239,16 +341,16 @@ io.on('connection', (socket) => {
       });
     }
 
-    room.choices.set(socket.id, move);
+    room.choices.set(player.seat, move);
     ack({ ok: true, move });
-    broadcastState(room); // only publishes locked=true, never the move
+    broadcastState(room);
 
     if (room.choices.size !== 2) return;
 
     const p0 = room.players.find((p) => p.seat === 0);
     const p1 = room.players.find((p) => p.seat === 1);
-    const move0 = room.choices.get(p0.socketId);
-    const move1 = room.choices.get(p1.socketId);
+    const move0 = room.choices.get(0);
+    const move1 = room.choices.get(1);
     const result = outcome(move0, move1);
 
     let winnerSeat = null;
@@ -256,22 +358,24 @@ io.on('connection', (socket) => {
     if (result.winner === 2) winnerSeat = 1;
     if (winnerSeat !== null) room.scores[winnerSeat] += 1;
 
+    const flavor = winnerSeat === null
+      ? tieDescription(move0, move1)
+      : (winnerSeat === 0 ? battleFlavor(move0, move1) : battleFlavor(move1, move0));
+
     const finishedRound = room.round;
     const resultPayload = {
       round: finishedRound,
       moves: [
-        { seat: 0, name: p0.name, move: move0 },
-        { seat: 1, name: p1.name, move: move1 }
+        { seat: 0, name: p0.name, move: move0, emoji: emojiFor(move0) },
+        { seat: 1, name: p1.name, move: move1, emoji: emojiFor(move1) }
       ],
       winnerSeat,
       winnerName: winnerSeat === null ? null : room.players.find((p) => p.seat === winnerSeat).name,
       text: result.text,
+      flavor,
       scores: [...room.scores]
     };
 
-    // Prepare the next round before emitting the result. A client still has to
-    // submit the new round number, preventing a stale/spam event from becoming
-    // an accidental choice for the next round.
     room.choices.clear();
     room.round += 1;
 
@@ -301,7 +405,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    leaveCurrentRoom(socket, 'opponent-disconnected');
+    markTemporarilyDisconnected(socket);
   });
 });
 
